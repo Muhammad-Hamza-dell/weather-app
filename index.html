@@ -349,6 +349,34 @@ function renderAQI(){
  const items=[["PM2.5",a.pm2_5,"µg/m³"],["PM10",a.pm10,"µg/m³"],["Ozone",a.ozone,"µg/m³"],["NO₂",a.nitrogen_dioxide,"µg/m³"],["SO₂",a.sulphur_dioxide,"µg/m³"],["CO",a.carbon_monoxide,"µg/m³"]];
  $("pollutants").innerHTML=items.map(([n,val,u])=>`<div class="pollutant"><span>${n}</span><b>${val!=null?Math.round(val):"--"}</b><span>${u}</span></div>`).join("");
 }
+async function reverseGeocode(lat,lon){
+ try{
+   const url=`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=jsonv2&addressdetails=1&zoom=16&accept-language=en`;
+   const r=await fetch(url,{headers:{"Accept":"application/json"}});
+   if(!r.ok)throw Error("Nominatim unavailable");
+   const j=await r.json();const a=j.address||{};
+   if(!a||(!a.village&&!a.town&&!a.city&&!a.hamlet&&!a.county))throw Error("No address detail");
+   const village=a.village||a.hamlet||a.suburb||a.neighbourhood||a.town||a.city;
+   const city=(a.town||a.city)&&(a.town||a.city)!==village?(a.town||a.city):null;
+   const district=(a.county||a.state_district)&&(a.county||a.state_district)!==city&&(a.county||a.state_district)!==village?(a.county||a.state_district):null;
+   const province=a.state||"";
+   const name=village||city||district||"My Location";
+   const parts=[city,district,province].filter(Boolean);
+   return {name,admin:parts.join(", "),country:a.country||""};
+ }catch(e){
+   const url2=`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`;
+   const r2=await fetch(url2);if(!r2.ok)throw Error("Reverse geocoding unavailable");
+   const j2=await r2.json();
+   const adminArr=j2.localityInfo?.administrative||[];
+   const findLevel=re=>adminArr.find(x=>re.test(x.description||x.name||""))?.name;
+   const village=j2.locality||findLevel(/village|town|municipality/i)||j2.city||"My Location";
+   const city=j2.city&&j2.city!==village?j2.city:null;
+   const district=findLevel(/district|county/i);
+   const province=j2.principalSubdivision||findLevel(/state|province/i);
+   const parts=[city,district&&district!==city?district:null,province].filter(Boolean);
+   return {name:village,admin:parts.join(", "),country:j2.countryName||""};
+ }
+}
 async function geocode(q){
  const url=`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=8&language=en&format=json`;
  const r=await fetch(url);if(!r.ok)throw Error("Geocoding service unavailable");
@@ -402,13 +430,44 @@ $("searchForm").addEventListener("submit",async e=>{e.preventDefault();const q=$
  try{const {best:r}=await geocode(q);state.lat=r.latitude;state.lon=r.longitude;state.name=r.name;state.admin=[r.admin2,r.admin1].filter(Boolean).join(", ")||"Pakistan";state.country=r.country||"Pakistan";await loadWeather(r.latitude,r.longitude);showStatus(`Showing weather for ${r.name}`);$("searchInput").value=""}
  catch(e){$("error").textContent=e.message||"Location could not be found.";$("error").classList.add("show")}
  finally{$("loading").classList.remove("show")}});
-$("locate").addEventListener("click",()=>{if(!navigator.geolocation){showStatus("Geolocation is not supported");return}$("loading").classList.add("show");navigator.geolocation.getCurrentPosition(async p=>{try{const {best:r}=await geocode(`${p.coords.latitude},${p.coords.longitude}`).catch(()=>({best:null}));state.lat=p.coords.latitude;state.lon=p.coords.longitude;if(r){state.name=r.name;state.admin=[r.admin2,r.admin1].filter(Boolean).join(", ");state.country=r.country||""}else{state.name="My Location";state.admin="Current coordinates";state.country=""}await loadWeather(state.lat,state.lon);showStatus("Using your location")}catch(e){$("error").textContent="Unable to use your location."; $("error").classList.add("show")}finally{$("loading").classList.remove("show")}},()=>{$("loading").classList.remove("show");$("error").textContent="Location permission was denied."; $("error").classList.add("show")})});
+function showLocationPrompt(){
+ $("error").innerHTML=`Location is off, so we're showing ${DEFAULT.name} for now. <button type="button" id="enableLocBtn" style="margin-left:8px;border:0;border-radius:10px;padding:6px 12px;background:#0f8fff;color:#fff;font-weight:700;cursor:pointer">Use my location</button>`;
+ $("error").classList.add("show");
+ $("enableLocBtn").addEventListener("click",()=>useMyLocation(false));
+}
+function useMyLocation(isInitial){
+ if(!navigator.geolocation){
+   if(isInitial){showLocationPrompt();refresh(DEFAULT)}else{showStatus("Geolocation is not supported")}
+   return;
+ }
+ $("loading").classList.add("show");$("error").classList.remove("show");
+ navigator.geolocation.getCurrentPosition(async p=>{
+   try{
+     state.lat=p.coords.latitude;state.lon=p.coords.longitude;
+     try{
+       const r=await reverseGeocode(p.coords.latitude,p.coords.longitude);
+       state.name=r.name;state.admin=r.admin;state.country=r.country;
+     }catch(e){state.name="My Location";state.admin="Current coordinates";state.country=""}
+     await loadWeather(state.lat,state.lon);
+     const acc=p.coords.accuracy;
+     if(acc&&acc>1500){showStatus(`Using your location (accuracy ~${Math.round(acc/1000)} km — enable GPS/high-accuracy mode on your device for a precise result)`)}
+     else if(acc){showStatus(`Using your location (accuracy ~${Math.round(acc)} m)`)}
+     else{showStatus("Using your location")}
+   }catch(e){$("error").textContent="Unable to use your location."; $("error").classList.add("show")}
+   finally{$("loading").classList.remove("show")}
+ },()=>{
+   $("loading").classList.remove("show");
+   if(isInitial){showLocationPrompt();refresh(DEFAULT)}
+   else{$("error").textContent="Location permission was denied."; $("error").classList.add("show")}
+ },{enableHighAccuracy:true,timeout:12000,maximumAge:0});
+}
+$("locate").addEventListener("click",()=>useMyLocation(false));
 $("theme").addEventListener("click",()=>{state.theme=state.theme==="dark"?"light":"dark";localStorage.setItem("weatherTheme",state.theme);setTheme()});
 $("unit").addEventListener("click",()=>{state.unit=state.unit==="C"?"F":"C";localStorage.setItem("weatherUnit",state.unit);$("unit").textContent=`°${state.unit}`;if(state.data){render();renderAQI()}});
 $("dayToggle").addEventListener("click",e=>{const btn=e.target.closest("button");if(!btn)return;state.range=parseInt(btn.dataset.r,10);[...$("dayToggle").children].forEach(b=>b.classList.toggle("active",b===btn));if(state.data)renderForecast()});
 setTheme();$("unit").textContent=`°${state.unit}`;
 renderFavorites();
-refresh(DEFAULT);
+useMyLocation(true);
 setInterval(()=>{if(state.data)refresh({lat:state.lat,lon:state.lon})},15*60*1000);
 </script>
 </body>
